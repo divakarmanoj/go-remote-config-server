@@ -1,17 +1,25 @@
 package client
 
 import (
-	"cloud.google.com/go/storage"
+	"bytes"
 	"context"
 	"errors"
-	"github.com/sardine-ai/go-remote-config/source"
-	"github.com/fullstorydev/emulators/storage/gcsemu"
 	"log"
 	"net/url"
 	"os"
 	"reflect"
 	"testing"
 	"time"
+
+	"cloud.google.com/go/storage"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/fullstorydev/emulators/storage/gcsemu"
+
+	"github.com/sardine-ai/go-remote-config/source"
 )
 
 func TestNewClient(t *testing.T) {
@@ -65,6 +73,37 @@ func TestNewClient(t *testing.T) {
 		log.Fatalf("Failed to close the GCS writer: %v", err)
 	}
 
+	endpointResolverOpt := config.WithBaseEndpoint("http://s3.localhost.localstack.cloud:4566")
+	credentialsProviderOpt := config.WithCredentialsProvider(credentials.StaticCredentialsProvider{
+		Value: aws.Credentials{
+			AccessKeyID: "dummy", SecretAccessKey: "dummy", SessionToken: "dummy",
+			Source: "Hard-coded credentials; values are irrelevant for local AWS services",
+		}})
+
+	cfg, err := config.LoadDefaultConfig(ctx, endpointResolverOpt, credentialsProviderOpt)
+	if err != nil {
+		log.Fatalf("Failed to load AWS client config: %v", err)
+	}
+	s3Client := s3.NewFromConfig(cfg)
+	_, err = s3Client.CreateBucket(ctx, &s3.CreateBucketInput{
+		CreateBucketConfiguration: &types.CreateBucketConfiguration{
+			LocationConstraint: types.BucketLocationConstraintUsEast2,
+		},
+		Bucket: aws.String("test-bucket"),
+	})
+	if err != nil {
+		log.Fatalf("Failed to create S3 bucket: %v", err)
+	}
+
+	_, err = s3Client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String("test-bucket"),
+		Key:    aws.String("test.yaml"),
+		Body:   bytes.NewReader(data),
+	})
+	if err != nil {
+		log.Fatalf("Failed to upload file to S3: %v", err)
+	}
+
 	testCases := []struct {
 		name            string
 		repository      source.Repository
@@ -88,6 +127,11 @@ func TestNewClient(t *testing.T) {
 		{
 			name:            "GcpStorageRepository",
 			repository:      &source.GcpStorageRepository{BucketName: "test-bucket", ObjectName: "test.yaml", Client: client},
+			refreshInterval: 10 * time.Second,
+		},
+		{
+			name:            "GcpStorageRepository",
+			repository:      &source.AwsS3Repository{BucketName: "test-bucket", ObjectName: "test.yaml", Client: s3Client},
 			refreshInterval: 10 * time.Second,
 		},
 	}
